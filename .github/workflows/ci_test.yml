@@ -32,10 +32,11 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
-      - name: shellcheck mkosi.scripts/
-        run: find mkosi.scripts/ -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
-      - name: shellcheck mkosi.finalize.d/
-        run: find mkosi.finalize.d/ -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
+      - name: shellcheck (yubiOS profile scripts, if present)
+        run: |
+          files=$(find mkosi.scripts/ mkosi.finalize.d/ -name '*.sh' 2>/dev/null || true)
+          if [ -z "$files" ]; then echo "no yubiOS-profile shell scripts on this ref — skipping"; exit 0; fi
+          echo "$files" | xargs shellcheck --severity=error
 
   ruff:
     name: Ruff (Python lint)
