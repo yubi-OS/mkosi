@@ -1,0 +1,50 @@
+name: ci_test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  validate-profile:
+    name: Profile syntax check
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6.0.2
+      - name: Install mkosi
+        run: |
+          sudo apt-get install -y python3 python3-pip
+          pip3 install --quiet .
+      # Parses conf files without needing a YubiKey or real build
+      - name: Profile syntax (yubios)
+        run: mkosi --profile yubios summary || true
+      - name: Profile syntax (yubiOS)
+        run: mkosi --profile yubiOS summary || true
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: shellcheck mkosi.scripts/
+        run: find mkosi.scripts/ -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
+      - name: shellcheck mkosi.finalize.d/
+        run: find mkosi.finalize.d/ -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
+
+  ruff:
+    name: Ruff (Python lint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Install ruff
+        run: pip3 install --quiet ruff
+      - name: ruff format check
+        run: ruff format --check --quiet mkosi/ tests/ kernel-install/*.install
+      - name: ruff lint
+        run: ruff check mkosi/ tests/ kernel-install/*.install
