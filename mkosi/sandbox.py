@@ -52,6 +52,7 @@ EFD_CLOEXEC = 0x80000
 ENAMETOOLONG = 36
 EPERM = 1
 ENOENT = 2
+ENODEV = 19
 ENOSYS = 38
 F_DUPFD = 0
 F_GETFD = 1
@@ -935,6 +936,23 @@ def userns_acquire_empty() -> int:
     return userns_fd
 
 
+class chroot:
+    def __init__(self, root: str) -> None:
+        self.root = root
+
+    def __enter__(self) -> None:
+        self.cwd = os.getcwd()
+        self.fd = os.open("/", os.O_CLOEXEC | os.O_PATH | os.O_DIRECTORY)
+        os.chroot(self.root)
+        os.chdir("/")
+
+    def __exit__(self, *args: object, **kwargs: object) -> None:
+        os.fchdir(self.fd)
+        os.close(self.fd)
+        os.chroot(".")
+        os.chdir(self.cwd)
+
+
 def chase(root: str, path: str, *, nofollow: bool = False) -> str:
     # pyright hack around `reportPossiblyUnboundVariable`; it doesn't understand
     # that it's defined/used only if `nofollow` is True
@@ -949,20 +967,10 @@ def chase(root: str, path: str, *, nofollow: bool = False) -> str:
             return os.path.join(os.path.realpath(parent), base)
         return os.path.realpath(path)
 
-    cwd = os.getcwd()
-    fd = os.open("/", os.O_CLOEXEC | os.O_PATH | os.O_DIRECTORY)
-
-    try:
-        os.chroot(root)
-        os.chdir("/")
+    with chroot(root):
         if nofollow:
             return joinpath(root, os.path.realpath(parent), base)
         return joinpath(root, os.path.realpath(path))
-    finally:
-        os.fchdir(fd)
-        os.close(fd)
-        os.chroot(".")
-        os.chdir(cwd)
 
 
 def splitpath(path: str) -> tuple[str, ...]:
@@ -1060,7 +1068,7 @@ class FSOperation:
         self.dst = dst
         self.relative = relative
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         raise NotImplementedError()
 
     def describe(self) -> str:
@@ -1142,7 +1150,7 @@ class BindOperation(FSOperation):
         suffix = f" [{', '.join(flags)}]" if flags else ""
         return f"bind {self.src} -> {self.dst}{suffix}"
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         src = chase(newroot if self.relative else oldroot, self.src, nofollow=self.nofollow)
 
         exists = os.path.lexists if self.nofollow else os.path.exists
@@ -1188,7 +1196,7 @@ class DevOperation(FSOperation):
     def describe(self) -> str:
         return f"dev at {self.dst}" + (f" (tty={self.ttyname})" if self.ttyname else "")
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         # We don't put actual devices in /dev, just the API stuff in there that all manner of
         # things depend on, like /dev/null.
         dst = chase(newroot, self.dst)
@@ -1233,7 +1241,7 @@ class TmpfsOperation(FSOperation):
     def describe(self) -> str:
         return f"tmpfs at {self.dst}"
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         dst = chase(newroot, self.dst)
         with umask(~0o755):
             os.makedirs(dst, exist_ok=True)
@@ -1246,7 +1254,7 @@ class DirOperation(FSOperation):
     def describe(self) -> str:
         return f"mkdir {self.dst}"
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         dst = chase(newroot, self.dst)
         with umask(~0o755):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -1265,7 +1273,7 @@ class SymlinkOperation(FSOperation):
     def describe(self) -> str:
         return f"symlink {self.dst} -> {self.src}"
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         dst = joinpath(newroot, self.dst)
         try:
             return os.symlink(self.src, dst)
@@ -1291,7 +1299,7 @@ class WriteOperation(FSOperation):
     def describe(self) -> str:
         return f"write {len(self.data)} bytes to {self.dst}"
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         dst = chase(newroot, self.dst)
         with umask(~0o755):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -1312,12 +1320,12 @@ class OverlayOperation(FSOperation):
     # This supports being used as a context manager so we can reuse the logic for mount_overlay()
     # in mounts.py.
     def __enter__(self) -> None:
-        self.execute("/", "/")
+        self.execute()
 
     def __exit__(self, *args: object, **kwargs: object) -> None:
         umount2(self.dst)
 
-    def execute(self, oldroot: str, newroot: str) -> None:
+    def execute(self, oldroot: str = "/", newroot: str = "/") -> None:
         lowerdirs = tuple(chase(oldroot, p) for p in self.lowerdirs)
         upperdir = (
             chase(oldroot, self.upperdir) if self.upperdir and self.upperdir != "tmpfs" else self.upperdir
@@ -1451,7 +1459,9 @@ def enter(argv: list[str]) -> list[str]:
 
     try:
         ttyname = os.ttyname(2) if os.isatty(2) else ""
-    except FileNotFoundError:
+    except OSError as exc:
+        if exc.errno not in (ENOENT, ENODEV):
+            raise
         ttyname = ""
 
     while argv:
