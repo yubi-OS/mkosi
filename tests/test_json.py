@@ -161,6 +161,7 @@ def test_config() -> None:
                     "Value": null
                 }
             ],
+            "DelegateRanges": 3,
             "Dependencies": [
                 "dep1"
             ],
@@ -385,6 +386,7 @@ def test_config() -> None:
                 "Source": "",
                 "Type": "file"
             },
+            "SignInitrdPCRs": "disabled",
             "SkeletonTrees": [
                 {
                     "Source": "/foo/bar",
@@ -414,6 +416,7 @@ def test_config() -> None:
             "Timezone": null,
             "ToolsTree": null,
             "ToolsTreeCertificates": true,
+            "UMask": null,
             "UnifiedKernelImageFormat": "myuki",
             "UnifiedKernelImageProfiles": [
                 {
@@ -486,6 +489,7 @@ def test_config() -> None:
             Credential(name="credkey", value="credval"),
             Credential(name="pathcred", path=Path("/secret/file")),
         ],
+        delegate_ranges=3,
         dependencies=["dep1"],
         distribution=Distribution.fedora,
         disk_type=QemuDiskType.virtio_blk,
@@ -541,6 +545,7 @@ def test_config() -> None:
         machine_id=uuid.UUID("b58253b0cc924a348782bcd99b20d07f"),
         machine="machine",
         make_scripts_executable=False,
+        umask=None,
         make_initrd=False,
         manifest_format=[ManifestFormat.json, ManifestFormat.changelog],
         maxmem=123,
@@ -611,6 +616,7 @@ def test_config() -> None:
         sign_expected_pcr_key_source=KeySource(type=KeySourceType.file),
         sign_expected_pcr_key=Path("/my/key"),
         sign_expected_pcr=ConfigFeature.disabled,
+        sign_initrd_pcrs=ConfigFeature.disabled,
         sign=False,
         skeleton_trees=[ConfigTree(Path("/foo/bar"), Path("/")), ConfigTree(Path("/bar/baz"), Path("/qux"))],
         snapshot="snapshot",

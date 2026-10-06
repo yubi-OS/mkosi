@@ -3,7 +3,7 @@ description: Install mkosi
 
 inputs:
   apk:
-    description: Install the apk package manager (required to bootstrap a postmarketOS tools tree)
+    description: Install the apk package manager (required to bootstrap a Nura tools tree)
     required: false
     default: "false"
 
@@ -22,14 +22,18 @@ runs:
         KERNEL=="vhost-vsock", GROUP="kvm", MODE="0666", OPTIONS+="static_node=vhost-vsock"
         KERNEL=="vhost-net", GROUP="kvm", MODE="0666", OPTIONS+="static_node=vhost-net"
         EOF
-        sudo udevadm control --reload-rules
+        if sudo udevadm control --ping &>/dev/null; then
+          sudo udevadm control --reload-rules
+        fi
         # kvm/vhost might not be available (e.g.: s390x, ppc64le)
         sudo modprobe kvm || true
         sudo modprobe vhost_vsock || true
         sudo modprobe vhost_net || true
-        [[ -e /dev/kvm ]] && sudo udevadm trigger --name-match=kvm
-        [[ -e /dev/vhost-vsock ]] && sudo udevadm trigger --name-match=vhost-vsock
-        [[ -e /dev/vhost-net ]] && sudo udevadm trigger --name-match=vhost-net
+        if sudo test -w /sys; then
+          [[ -e /dev/kvm ]] && sudo udevadm trigger --name-match=kvm
+          [[ -e /dev/vhost-vsock ]] && sudo udevadm trigger --name-match=vhost-vsock
+          [[ -e /dev/vhost-net ]] && sudo udevadm trigger --name-match=vhost-net
+        fi
         [[ -e /dev/kvm ]] && sudo chmod 666 /dev/kvm
         [[ -e /dev/vhost-vsock ]] && sudo chmod 666 /dev/vhost-vsock
         [[ -e /dev/vhost-net ]] && sudo chmod 666 /dev/vhost-net
@@ -75,7 +79,9 @@ runs:
         # This command fails with a non-zero error code even though it unloads the apparmor profiles.
         # https://gitlab.com/apparmor/apparmor/-/issues/403
         sudo aa-teardown || true
-        sudo apt-get remove apparmor
+        if command -v apt-get >/dev/null; then
+          sudo apt-get remove apparmor
+        fi
 
     - name: Ensure git history is available
       shell: bash
@@ -100,20 +106,48 @@ runs:
 
     - name: Install apk
       # ubuntu-24.04 doesn't package apk, so fetch the official statically-linked binary from
-      # upstream so mkosi can use it to populate the postmarketOS tools tree.
+      # upstream so mkosi can use it to populate the Nura tools tree.
+      #
+      # Since GitLab's API can be unreliable, this is retried a few times if there
+      # is a failure when fetching.
       #
       # NOTE: apk is dropped into /usr/bin and not /usr/local/bin because later CI
       # scripts (like .github/workflows/ci.yml) clean up /usr/local
       if: ${{ inputs.apk == 'true' }}
       shell: bash
       run: |
-        sudo curl -fsSL -o /usr/bin/apk https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.6/x86_64/apk.static
-        echo 'f1489e05bace7d7dd0a687fcd38d50b585ac660af4231668b123649bef3718c4  /usr/bin/apk' | sha256sum --check
+        set +e
+        APK_TOOLS_API="https://gitlab.alpinelinux.org/api/v4/projects/5"
+        APK_FALLBACK_VERSION='v3.0.8'
+        APK_FALLBACK_SHA256='11758d76de3699c7606152357f415f55879743ccf0e3d8942d5ba98cf29a3c86'
+
+        APK_VERSION=$(curl -fsSL --retry 5 --retry-all-errors --retry-max-time 30 "${APK_TOOLS_API}/repository/tags" | jq -r '.[].name' | grep -v '_rc' | sort -V | tail -1)
+        if [[ -n "$APK_VERSION" && "$APK_VERSION" != "$APK_FALLBACK_VERSION" ]]
+        then
+            APK_PKG_ID=$(curl -fsSL --retry 5 --retry-all-errors --retry-max-time 30 "${APK_TOOLS_API}/packages?package_name=${APK_VERSION}&package_type=generic" | jq '.[] | select(.version == "x86_64") | .id' | sort -n | tail -1)
+            APK_SHA256=$(curl -fsSL --retry 5 --retry-all-errors --retry-max-time 30 "${APK_TOOLS_API}/packages/${APK_PKG_ID}/package_files" | jq -r '.[0].file_sha256')
+        fi
+        set -e
+
+        # If the API fails, fall back to a known-good version
+        if [[ -z "$APK_VERSION" || -z "$APK_SHA256" || "$APK_SHA256" == null ]]
+        then
+            APK_VERSION="$APK_FALLBACK_VERSION"
+            APK_SHA256="$APK_FALLBACK_SHA256"
+        fi
+
+        sudo curl -fsSL --retry 5 --retry-all-errors -o /usr/bin/apk "$APK_TOOLS_API/packages/generic/${APK_VERSION}/x86_64/apk.static"
+        echo "${APK_SHA256}  /usr/bin/apk" | sha256sum --check
         sudo chmod +x /usr/bin/apk
 
     - name: Dependencies
       shell: bash
       run: |
+        if ! command -v apt-get >/dev/null; then
+          echo "apt-get not available, skipping dependency installation."
+          exit 0
+        fi
+
         sudo apt-get update
 
         # makepkg and pacman-package-manager were only added in noble (24.04).

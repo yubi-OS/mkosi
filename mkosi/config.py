@@ -908,6 +908,18 @@ def config_parse_boolean(value: Optional[str], old: Optional[bool]) -> Optional[
     return parse_boolean(value)
 
 
+def config_parse_int(value: Optional[str], old: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+
+    try:
+        num = int(value)
+    except ValueError:
+        die(f"{value!r} is not a valid integer")
+
+    return num
+
+
 def parse_feature(value: str) -> ConfigFeature:
     try:
         return ConfigFeature(value)
@@ -1077,10 +1089,7 @@ def config_default_tools_tree_distribution(namespace: dict[str, Any]) -> Distrib
 
 def config_default_repository_key_fetch(namespace: dict[str, Any]) -> bool:
     def needs_repository_key_fetch(distribution: Distribution) -> bool:
-        return (
-            distribution in (Distribution.arch, Distribution.postmarketos)
-            or distribution.is_rpm_distribution()
-        )
+        return distribution in (Distribution.arch, Distribution.nura) or distribution.is_rpm_distribution()
 
     if namespace["tools_tree"] not in (Path("default"), Path("yes")):
         d = detect_distribution(namespace["tools_tree"] or Path("/"))[0]
@@ -2210,6 +2219,7 @@ class Config:
     sign_expected_pcr_key_source: KeySource
     sign_expected_pcr_certificate: Optional[Path]
     sign_expected_pcr_certificate_source: CertificateSource
+    sign_initrd_pcrs: ConfigFeature
     passphrase: Optional[Path]
     checksum: bool
     sign: bool
@@ -2244,6 +2254,8 @@ class Config:
     proxy_client_key: Optional[Path]
     make_scripts_executable: bool
     foreign_uid_range: bool
+    umask: Optional[int]
+    delegate_ranges: int
 
     nspawn_settings: Optional[Path]
     ephemeral: bool
@@ -2629,6 +2641,9 @@ class Config:
         options: Sequence[PathString] = (),
     ) -> AbstractContextManager[list[PathString]]:
         opt: list[PathString] = [*options]
+
+        if self.umask is not None:
+            opt += ["--umask", f"{self.umask:o}"]
 
         if not relaxed:
             opt += flatten(("--ro-bind", d, d) for d in self.extra_search_paths)
@@ -3299,6 +3314,7 @@ SETTINGS: list[ConfigSetting[Any]] = [
         dest="bootloader",
         section="Content",
         parse=config_make_enum_parser(Bootloader),
+        match=config_make_enum_matcher(Bootloader),
         choices=Bootloader.choices(),
         default=Bootloader.systemd_boot,
         help="Specify which UEFI bootloader to use",
@@ -3770,6 +3786,14 @@ SETTINGS: list[ConfigSetting[Any]] = [
         scope=SettingScope.inherit,
     ),
     ConfigSetting(
+        dest="sign_initrd_pcrs",
+        metavar="FEATURE",
+        section="Validation",
+        name="SignInitrdPCRs",
+        parse=config_parse_feature,
+        help="Generate a signed PCR policy that can only be satisfied from the initrd and embed this into the UKI",  # noqa: E501
+    ),
+    ConfigSetting(
         dest="passphrase",
         metavar="PATH",
         section="Validation",
@@ -3862,6 +3886,21 @@ SETTINGS: list[ConfigSetting[Any]] = [
             )
         ),
         help="Set the mirror to use for the default tools tree",
+        scope=SettingScope.tools,
+    ),
+    ConfigSetting(
+        dest="tools_tree_snapshot",
+        metavar="SNAPSHOT",
+        section="Build",
+        default_factory_depends=("distribution", "snapshot", "tools_tree_distribution"),
+        default_factory=(
+            lambda ns: (
+                ns["snapshot"]
+                if ns["snapshot"] and ns["distribution"] == ns["tools_tree_distribution"]
+                else None
+            )
+        ),
+        help="Set the distribution snapshot to use for the default tools tree",
         scope=SettingScope.tools,
     ),
     ConfigSetting(
@@ -4167,6 +4206,24 @@ SETTINGS: list[ConfigSetting[Any]] = [
         section="Build",
         parse=config_parse_boolean,
         help="Use the foreign UID range",
+        scope=SettingScope.main,
+    ),
+    ConfigSetting(
+        dest="umask",
+        name="UMask",
+        metavar="MASK",
+        section="Build",
+        parse=config_parse_mode,
+        help="Set umask for processes running in the sandbox",
+        scope=SettingScope.multiversal,
+    ),
+    ConfigSetting(
+        dest="delegate_ranges",
+        name="DelegateRanges",
+        section="Build",
+        default=0 if (os.getuid() == 0 and os.getgid() == 0) else 3,
+        parse=config_parse_int,
+        help="Delegate this number of UID ranges in the foreign UID range",
         scope=SettingScope.main,
     ),
     # Runtime section
@@ -5445,6 +5502,15 @@ def want_default_initrd(config: Config) -> bool:
     return Path("default") in config.initrds
 
 
+def want_prebuilt_uki(config: Config) -> bool:
+    # Returns True when mkosi should use a distro-pre-built signed UKI rather than building one itself.
+    # This happens when a signed bootloader is selected (implying distro UKIs) or when
+    # UnifiedKernelImages=signed is set explicitly.
+    return (
+        config.bootloader.is_signed() and config.unified_kernel_images == UnifiedKernelImage.auto
+    ) or config.unified_kernel_images == UnifiedKernelImage.signed
+
+
 def finalize_historydir(args: Args, output_dir: Optional[Path] = None) -> Path:
     # When an output directory is given, the build history is also stored there so that builds into
     # distinct output directories don't read each other's history. Otherwise it lives in the config dir.
@@ -5962,6 +6028,7 @@ def summary(config: Config) -> str:
            Expected PCRs Key Source: {config.sign_expected_pcr_key_source}
           Expected PCRs Certificate: {none_to_none(config.sign_expected_pcr_certificate)}
    Expected PCRs Certificate Source: {config.sign_expected_pcr_certificate_source}
+                   Sign initrd PCRs: {config.sign_initrd_pcrs}
                          Passphrase: {none_to_none(config.passphrase)}
                            Checksum: {yes_no(config.checksum)}
                                Sign: {yes_no(config.sign)}
@@ -5975,6 +6042,9 @@ def summary(config: Config) -> str:
     {bold("BUILD CONFIGURATION")}:
                          Tools Tree: {config.tools_tree}
             Tools Tree Certificates: {yes_no(config.tools_tree_certificates)}
+
+          Use the Foreign UID Range: {yes_no(config.foreign_uid_range)}
+         Number of Delegated Ranges: {config.delegate_ranges}
 
                  Extra Search Paths: {line_join_list(config.extra_search_paths)}
                         Incremental: {config.incremental}
@@ -6002,6 +6072,7 @@ def summary(config: Config) -> str:
                    Proxy Client Key: {none_to_none(config.proxy_client_key)}
 
     Automatically set +x on scripts: {yes_no(config.make_scripts_executable)}
+                      Sandbox UMask: {format_octal_or_default(config.umask)}
 
     {bold("HOST CONFIGURATION")}:
                     NSpawn Settings: {none_to_none(config.nspawn_settings)}

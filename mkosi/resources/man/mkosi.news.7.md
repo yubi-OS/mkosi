@@ -4,9 +4,60 @@
 
 # mkosi Changelog
 
+## v27.1
+
+- Fix tests failing in restricted build environments
+- `SignInitrdPCRs=` can be used with `SplitArtifacts=pcrs`, fixing initrd-specific PCR policies with systemd
+  v262.
+- Don't fail creating initrds when there are directories mixed in with microcode files.
+- Fix builds when using unsigned local repositories with opensuse.
+- Only use repositories and variables from the sandbox tree when using DNF.
+- The mkosi-obs no longer sets `MakeScriptsExecutable=`, except for the main image, so it can be included
+  again.
+- The security and debug repositories are switched back to deb.debian.org and are no longer set by the
+  `Repositories=` setting.
+- Add an environment variable `MKOSI_FORCE_USERNS_FALLBACK` that when set to a value that parses as a truthy
+  bool, skips using systemd-nsresourced.
+- A new setting `DelegateRanges=` is added that defaults to 0 when mkosi is run as the root user. This fixes
+  builds run as the root user.
+
 ## v27
 
+- Debug output (with `--debug`) will now show the duration of all steps.
+- When booting an image it is always registered with user session machined instance.
+- gzip compressed outputs have been made reproducible.
 - Generate locales configured in `/etc/locale.gen`.
+- `PORTABLE_PREFIXES=` can be set via `Environment=`.
+- The special value `default` is now understood for `Initrds=`, so that it can be used in conjunction with
+  custom initrds.
+- Plugins for DNF can be configured via the environment variables `MKOSI_DNF_DISABLE_PLUGINS` and
+  `MKOSI_DNF_ENABLE_PLUGINS`. This is meant for advanced use cases and is not supported further.
+- A new option `MakeScriptsExecutable=` has been added to make scripts, that are not executable, executable
+  instead of exiting with an error.
+- A new option `OutputSize=` has been added to resize output images to that size after creation.
+- Two new options `OciLabels=` and `OciAnnotations=` have been added to support adding custom labels and
+  annotations for images using the OCI output.
+- Default initrds are no longer built by default for images using the `directory` output.
+- All cached images are removed when repository metadata will be synced to avoid partial upgrade scenarios.
+- When booting images the hostname is no longer set via the kernel command line so as not to overwrite the
+  hostname set via other means in the image.
+- Support for using systemd-nsresourced's foreign UID range has been added for directory images via the new
+  `ForeignUIDRange=`. This is now the only supported way for booting directory images unprivileged. Building
+  images unprivileged without a sufficiently new systemd-nsresourced is still supported.
+- If a `mkosi/` directory exists and no output location is configured, the `.mkosi-private` will be put there.
+- `LocalMirror=` can now be set for tools trees.
+- A new setting `DiskType=` has been added to configures the disk type to use for the root disk when booting
+  a virtual machine.
+- Four new settings `ElTorito=`, `ElToritoSystem=`, `ElToritoVolume=`, and `ElToritoPublisher=` for use with
+  systemd-repart's El Torito support have been added.
+- `mkosi box` does not tint the background by itself anymore.
+- The GitHub integration tests have been made runnable locally.
+- Support for distribution-built UKIs have been fixed and they are picked up as
+  `/usr/lib/modules/<kver>/vmlinuz*.efi` if a signed bootloader or `UnifiedKernelImages=signed` is requested.
+- The `update-grub` trigger of APK is disabled for postmarketOS if `/etc/update-grub.conf` does not exist. If
+  you define the file yourself, you must set `disable_trigger=1` yourself, if you pull in the grub package.
+- A new option `ToolsTreeSnapshot` was added, which defaults to the value of the regular `Snapshot=` setting
+  if the same distribution is used for the image and the tools tree.
 
 ## v26
 

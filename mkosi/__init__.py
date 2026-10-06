@@ -83,6 +83,7 @@ from mkosi.config import (
     summary,
     systemd_tool_version,
     want_kernel,
+    want_prebuilt_uki,
     want_selinux_relabel,
     yes_no,
 )
@@ -1503,11 +1504,18 @@ def build_microcode_initrd(context: Context) -> list[Path]:
             if amd.exists():
                 with (destdir / "AuthenticAMD.bin").open("wb") as f:
                     for p in amd.iterdir():
+                        if not p.is_file():
+                            continue
                         f.write(p.read_bytes())
 
             if intel.exists():
                 with (destdir / "GenuineIntel.bin").open("wb") as f:
                     for p in intel.iterdir():
+                        # On some distributions the Intel ucode directory may contain directories like
+                        # intel-ucode-with-caveats, that contain microcode that needs special patches in the
+                        # kernel or other manual interventions, so we ignore these.
+                        if not p.is_file():
+                            continue
                         f.write(p.read_bytes())
 
         # Normalize timestamps for reproducible builds before creating cpio
@@ -1720,6 +1728,7 @@ def build_uki(
         die("Could not find ukify")
 
     json_out = False
+    ukify_version = systemd_tool_version(python_binary(context.config), ukify, sandbox=context.sandbox)
 
     arguments: list[PathString] = [
         "--os-release", f"@{workdir(context.root / 'usr/lib/os-release')}",
@@ -1775,17 +1784,15 @@ def build_uki(
             "--pcr-banks", "sha256",
         ]  # fmt: skip
 
-        if (
-            systemd_tool_version(
-                python_binary(context.config),
-                ukify,
-                sandbox=context.sandbox,
-            )
-            >= "258"
-        ):
+        if ukify_version >= "258":
             cert_parameter = "--pcr-certificate"
         else:
             cert_parameter = "--pcr-public-key"
+
+        if context.config.sign_initrd_pcrs == ConfigFeature.enabled or (
+            context.config.sign_initrd_pcrs == ConfigFeature.auto and ukify_version >= "262~"
+        ):
+            arguments += ["--sign-initrd-pcrs"]
 
         # If we're providing the private key via an engine or provider, we have to pass in a X.509
         # certificate via --pcr-certificate as well.
@@ -1829,6 +1836,10 @@ def build_uki(
             "--pcr-banks", "sha256",
             "--pcr-certificate", workdir(context.config.sign_expected_pcr_certificate),
         ]  # fmt: skip
+        if context.config.sign_initrd_pcrs == ConfigFeature.enabled or (
+            context.config.sign_initrd_pcrs == ConfigFeature.auto and ukify_version >= "262~"
+        ):
+            arguments += ["--sign-initrd-pcrs"]
         options += [
             "--ro-bind", context.config.sign_expected_pcr_certificate, workdir(context.config.sign_expected_pcr_certificate),  # noqa: E501
         ]  # fmt: skip
@@ -2144,10 +2155,7 @@ def install_uki(
     with umask(~0o700):
         boot_binary.parent.mkdir(parents=True, exist_ok=True)
 
-    if (
-        context.config.bootloader.is_signed()
-        and context.config.unified_kernel_images == UnifiedKernelImage.auto
-    ) or context.config.unified_kernel_images == UnifiedKernelImage.signed:
+    if want_prebuilt_uki(context.config):
         for p in (context.root / "usr/lib/modules" / kver).glob("*.efi"):
             log_step(f"Installing prebuilt UKI at {p} to {boot_binary}")
             copyfile2(p, boot_binary)
@@ -2756,6 +2764,11 @@ def check_inputs(config: Config) -> None:
             hint="Run mkosi genkey to generate a key/certificate pair",
         )
 
+    if config.sign_initrd_pcrs == ConfigFeature.enabled and not (
+        want_signed_pcrs(config) or ArtifactOutput.pcrs in config.split_artifacts
+    ):
+        die("SignInitrdPCRs= is enabled but neither PCR signing nor SplitArtifacts=pcrs are enabled")
+
     if config.secure_boot_key_source != config.sign_expected_pcr_key_source:
         die("Secure boot key source and expected PCR signatures key source have to be the same")
 
@@ -2807,7 +2820,7 @@ def check_inputs(config: Config) -> None:
         check_systemd_tool(
             config,
             "systemd-repart",
-            version="261~devel",
+            version="261",
             reason="use El Torito options",
         )
 
@@ -2904,6 +2917,13 @@ def check_tools(config: Config, verb: Verb) -> None:
                     version="256",
                     reason="sign PCR hashes with OpenSSL engine",
                 )
+
+        if config.sign_initrd_pcrs == ConfigFeature.enabled and want_signed_pcrs(config):
+            check_ukify(
+                config,
+                version="262~",
+                reason="sign a PCR policy for the initrd",
+            )
 
         if config.verity_key_source.type != KeySourceType.file:
             check_systemd_tool(
@@ -3503,7 +3523,7 @@ def make_image(
     if (
         el_torito
         and el_torito_wanted
-        and systemd_tool_version("systemd-repart", sandbox=context.sandbox) >= "261~devel"
+        and systemd_tool_version("systemd-repart", sandbox=context.sandbox) >= "261"
     ):
         cmdline += ["--el-torito=yes"]
         if context.config.el_torito_system:
@@ -4398,7 +4418,7 @@ def run_shell(args: Args, config: Config) -> None:
             cmdline += ["--bind-user", getpass.getuser(), "--bind-user-group=wheel"]
 
         if args.verb == Verb.boot and config.forward_journal:
-            if systemd_tool_version("systemd-nspawn", sandbox=config.sandbox) >= "261~devel":
+            if systemd_tool_version("systemd-nspawn", sandbox=config.sandbox) >= "261":
                 cmdline += [
                     "--forward-journal", config.forward_journal,
                     "--forward-journal-max-use=1T",
@@ -5089,14 +5109,24 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
         return
 
     try:
+        if parse_boolean(os.getenv("MKOSI_FORCE_USERNS_FALLBACK") or "0"):
+            raise ConnectionRefusedError("Forced fallback to unpriv userns.")
+
         # Try to get a user namespace with some delegated ranges and the foreign UID range via
-        # systemd-nsresourced if we can.
-        acquire_privileges(foreign=True, delegate=3)
-    # Don't fail if systemd-nsresourced is too old or not installed unless the foreign UID range was
-    # explicitly requested, use a regular unpriv user namespace instead.
+        # systemd-nsresourced if we can, unless we're running as root, then
+        # - Only use the foreign UID range if it was explicitly requested
+        # - Only use delegated ranges if they were requested
+        acquire_privileges(
+            foreign=last.foreign_uid_range if (os.getuid() == 0 and os.getgid() == 0) else True,
+            delegate_ranges=last.delegate_ranges,
+        )
+    # Don't fail if systemd-nsresourced is too old, not installed or refuses to provision a user namespace
+    # for us unless the foreign UID range was explicitly requested, use a regular unpriv user namespace
+    # instead.
     except (FileNotFoundError, VarlinkError, ConnectionRefusedError) as e:
         if isinstance(e, VarlinkError) and e.error not in (
             "org.varlink.service.InvalidParameter",
+            "org.varlink.service.PermissionDenied",
             "io.systemd.NamespaceResource.UserNamespaceInterfaceNotSupported",
         ):
             raise
@@ -5104,7 +5134,7 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
         if last.foreign_uid_range:
             die(f"Could not provision user namespace via systemd-nsresourced ({e})")
 
-        logging.debug(
+        logging.info(
             f"Could not provision user namespace via systemd-nsresourced ({e}), falling back to "
             "unprivileged user namespace via unshare(CLONE_NEWUSER) and writing /proc/self/uid_map directly",
         )

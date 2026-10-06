@@ -572,6 +572,9 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 
     For any distribution not listed above, snapshots are not supported.
 
+    Note that this setting does not apply to the default tools tree; use
+    `ToolsTreeSnapshot=` for that.
+
 `LocalMirror=`, `--local-mirror=`
 :   The mirror will be used as a local, plain and direct mirror instead
     of using it as a prefix for the full set of repositories normally supported
@@ -1454,6 +1457,20 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 `SignExpectedPcrCertificate=`, `--sign-expected-pcr-certificate=`
 :   Path to the X.509 file containing the certificate for signing the expected PCR signatures.
 
+`SignInitrdPCRs=`, `--sign-initrd-pcrs=`
+:   Whether to generate PCR policies that can only be satisfied from the initrd.
+    This is required for initialization of NvPCRs. This takes a boolean value or
+    the special value `auto`, which is the default and is equivalent to a true
+    value if the version of **ukify** is at least v262 and either PCR signing is
+    enabled (see `SignExpectedPcr=`) or `pcrs` is selected in `SplitArtifacts=`.
+    If enabled explicitly, either PCR signing or `SplitArtifacts=pcrs` must be
+    enabled as well.
+
+    When PCR signing is enabled, the policies are signed with the key supplied to
+    `SignExpectedPcrKey=` and embedded in the UKI. If `SplitArtifacts=pcrs` is
+    enabled and PCR signing is disabled, the policy digests are written unsigned to
+    the split PCR JSON artifact for offline signing.
+
 `SecureBootKeySource=`, `--secure-boot-key-source=`, `VerityKeySource=`, `--verity-key-source=`, `SignExpectedPcrKeySource=`, `--sign-expected-key-source=`
 :   The source of the corresponding private key, to support OpenSSL engines and providers,
     e.g. `--secure-boot-key-source=engine:pkcs11` or `--secure-boot-key-source=provider:pkcs11`.
@@ -1550,6 +1567,11 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 :   Set the mirror to use for the default tools tree. By default, the
     default mirror for the tools tree distribution is used.
 
+`ToolsTreeSnapshot=`, `--tools-tree-snapshot=`
+:   Same as `Snapshot=` but for the default tools tree. By default, if the
+    tools tree distribution matches the image's distribution, the image's
+    snapshot is used.
+
 `ToolsTreeRepositories=`, `--tools-tree-repository=`
 :   Same as `Repositories=` but for the default tools tree.
 
@@ -1621,7 +1643,8 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
     it will use the configuration files from their canonical locations
     in `/usr` or `/etc` in the sandbox trees. For example, it  will look
     for `/etc/dnf/dnf.conf` in the sandbox trees  if **dnf** is used to
-    install packages.
+    install packages. See **PACKAGE MANAGER-SPECIFIC BEHAVIOUR** for
+    further details.
 
 `WorkspaceDirectory=`, `--workspace-directory=`
 :   Path to a directory where to store data required temporarily while
@@ -1837,6 +1860,19 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 
     systemd-nsresourced and systemd-mountfsd v260 or newer are required on the host
     to make use of this option.
+
+`UMask=`, `--umask=`
+:   Set the umask for all processes running in the build sandbox, including package
+    managers and build scripts. Takes an octal value, e.g. `0022`. If not set, the
+    host umask is inherited.
+
+    This is useful on hardened builder machines where a restrictive system-wide umask
+    (e.g. `0027`) would otherwise leak into the sandbox and cause files installed into
+    the image to have unexpected permissions.
+
+`DelegateRanges=`, `--delegate-ranges=`
+:   Set the number of delegated ranges in the foreign UID range. Defaults to 3 for regular users and 0 for
+    root.
 
 ### [Runtime] Section (previously known as the [Host] section)
 
@@ -2190,6 +2226,9 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 :   Matches against repositories enabled with the `Repositories=` setting.
     Takes a single repository name.
 
+`OutputFormat=`
+:   Matches against the configured value for `OutputFormat=`.
+
 `PathExists=`
 :   This condition is satisfied if the given path exists. Relative paths are interpreted relative to the parent
     directory of the config file that the condition is read from.
@@ -2206,6 +2245,9 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 
 `Bootable=`
 :   Matches against the configured value for the `Bootable=` feature. Takes a boolean value or `auto`.
+
+`Bootloader=`
+:   Matches against the configured value for `Bootloader=`.
 
 `Format=`
 :   Matches against the configured value for the `Format=` option. Takes
@@ -2450,7 +2492,7 @@ distributions:
 
 * *Azure Linux*
 
-* *postmarketOS*
+* *Nura*
 
 * *None* (**Requires the user to provide a pre-built rootfs**)
 
@@ -2483,8 +2525,9 @@ in consecutive runs with data from the cached one.
 1. Parse CLI options
 1. Parse configuration files
 1. Run configure scripts (`mkosi.configure`)
-1. If we're not running as root, unshare the user namespace and map the
-   subuid range configured in `/etc/subuid` and `/etc/subgid` into it.
+1. If we're not running as root, unshare the user namespace and map the the current user to root in it.  If
+   available this uses systemd-nsresourced to acquire a delegated range in the foreign UID range, otherwise
+   an unprivileged user namespace is set up by mkosi.
 1. Unshare the mount namespace
 1. Remount the following directories read-only if they exist:
    - `/usr`
@@ -3036,7 +3079,7 @@ The following table shows for which distributions default tools tree
 packages are defined and which packages are included in those default
 tools trees:
 
-|                         | Fedora | CentOS | Debian | Kali | Ubuntu | Arch | openSUSE | postmarketOS |
+|                         | Fedora | CentOS | Debian | Kali | Ubuntu | Arch | openSUSE | Nura         |
 |-------------------------|:------:|:------:|:------:|:----:|:------:|:----:|:--------:|:------------:|
 | `acl`                   | ✓      | ✓      | ✓      | ✓    | ✓      | ✓    | ✓        | ✓            |
 | `apt`                   | ✓      | ✓      | ✓      | ✓    | ✓      | ✓    |          |              |
@@ -3093,6 +3136,28 @@ tools trees:
 | `xz`                    | ✓      | ✓      | ✓      | ✓    | ✓      | ✓    | ✓        | ✓            |
 | `zstd`                  | ✓      | ✓      | ✓      | ✓    | ✓      | ✓    | ✓        | ✓            |
 | `zypper`                | ✓      |        | ✓      | ✓    | ✓      | ✓    | ✓        |              |
+
+# PACKAGE MANAGER-SPECIFC BEHAVIOUR
+
+## Arch and other pacman-based distributions
+
+mkosi generates a `pacman.conf` in the sanbox tree if one doesn't exist. If one exists, a `DownloadUser`
+setting is always removed. The generated config will always include all files with the `.conf` extension from
+`/etc/pacman.d` in the sandbox tree.
+
+## Debian and other deb-based distributions
+
+mkosi generates `/etc/apt/sources.list.d/mkosi.sources` in the sandbox tree if it does not exist.
+The configured `Mirror=` is used for everything except for the security and debug repositories, which always
+use http://deb.debian.org.
+
+## Fedora and other distributions using DNF
+
+mkosi generates `/etc/yum.repos.d/mkosi.repo` in the sandbox tree if it does not exist.
+
+## Opensuse and other distributions using Zypper
+
+mkosi generates `/etc/zypp/repos.d/mkosi.repo` in the sandbox tree if it does not exist.
 
 # BUILDING MULTIPLE IMAGES
 
@@ -3193,6 +3258,7 @@ the main image but which are not passed down to subimages:
 - `ToolsTreeRelease=`
 - `ToolsTreeProfiles=`
 - `ToolsTreeMirror=`
+- `ToolsTreeSnapshot=`
 - `ToolsTreeRepositories=`
 - `ToolsTreeSandboxTrees=`
 - `ToolsTreePackages=`
@@ -3469,6 +3535,11 @@ For other systems, try researching the `kernel.unprivileged_userns_clone` or
   attach properly, even when the key is not set, **mkosi** doesn't set one.
 
   You can set `PORTABLE_PREFIXES=` by setting `Environment=PORTABLE_PREFIXES=XXX` in your mkosi config.
+
+- `BaseTrees=`/`Overlay=` do not work with nsresourced?
+
+  This is expected and need upstream kernel changes expected to land in Linux 7.3. You can skip the usage of
+  nsresourced by setting the environment variable `MKOSI_FORCE_USERNS_FALLBACK` to a true value.
 
 # REFERENCES
 * [Primary mkosi git repository on GitHub](https://github.com/systemd/mkosi/)

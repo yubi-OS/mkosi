@@ -13,7 +13,7 @@ import os
 import sys
 import warnings  # noqa: F401 (loaded lazily by os.execvp() which happens too late)
 
-__version__ = "27~devel"
+__version__ = "28~devel"
 
 # The following constants are taken from the Linux kernel headers.
 AT_EMPTY_PATH = 0x1000
@@ -75,8 +75,9 @@ MOVE_MOUNT_F_EMPTY_PATH = 0x00000004
 MS_BIND = 4096
 MS_MOVE = 8192
 MS_REC = 16384
-MS_SHARED = 1 << 20
+MS_PRIVATE = 1 << 18
 MS_SLAVE = 1 << 19
+MS_SHARED = 1 << 20
 NR_mount_setattr = 442
 NR_move_mount = 429
 NR_open_tree = 428
@@ -744,7 +745,7 @@ def nsresource_allocate_user_range(
     userns: FD,
     type: str = "managed",
     foreign: bool = False,
-    delegate: int = 0,
+    delegate_ranges: int = 0,
     become_root: bool = False,
 ) -> None:
     import uuid
@@ -759,7 +760,7 @@ def nsresource_allocate_user_range(
             "type": type,
             **({"target": 0} if become_root or type != "self" else {}),
             "mapForeign": foreign,
-            "delegateContainerRanges": delegate,
+            "delegateContainerRanges": delegate_ranges,
         },
         fds=(userns,),
     )
@@ -856,7 +857,7 @@ def acquire_privileges(
     *,
     identity: bool = True,
     foreign: bool = False,
-    delegate: int = 0,
+    delegate_ranges: int = 0,
     become_root: bool = False,
     network: bool = False,
 ) -> bool:
@@ -864,12 +865,12 @@ def acquire_privileges(
         have_effective_cap(CAP_SYS_ADMIN)
         and identity
         and (not foreign or have_effective_cap(CAP_CHOWN))
-        and not delegate
+        and (delegate_ranges == 0)
         and (not become_root or (os.getuid() == 0 and os.getgid() == 0))
     ):
         return False
 
-    if not identity or (foreign and not have_effective_cap(CAP_CHOWN)) or delegate:
+    if not identity or (foreign and not have_effective_cap(CAP_CHOWN)) or delegate_ranges:
         # nsresource_allocate_user_range() might fail for various reasons and we don't want to leave
         # the process in an empty user namespace if that's the case. Hence we don't unshare our own
         # user namespace but get ourselves a child user namespace which we pass to nsresourced. We only
@@ -879,7 +880,7 @@ def acquire_privileges(
                 userns_fd,
                 "self" if identity else "managed",
                 foreign,
-                delegate,
+                delegate_ranges,
                 become_root,
             )
             setns(userns_fd, CLONE_NEWUSER)
@@ -1419,6 +1420,7 @@ mkosi-sandbox [OPTIONS...] COMMAND [ARGUMENTS...]
      --map-delegate N             Map N additional 64K UID/GID ranges in the sandbox
      --suppress-chown             Make chown() syscalls in the sandbox a noop
      --suppress-sync              Make sync() syscalls in the sandbox a noop
+     --umask MASK                 Set the umask for processes running in the sandbox
      --unshare-net                Unshare the network namespace if possible
      --unshare-ipc                Unshare the IPC namespace if possible
      --debug                      Log each filesystem operation before executing it
@@ -1455,6 +1457,7 @@ def enter(argv: list[str]) -> list[str]:
     pack_fds = False
     map_foreign = False
     map_delegate = 0
+    umask_value = None
     debug = False
 
     try:
@@ -1551,6 +1554,8 @@ def enter(argv: list[str]) -> list[str]:
             suppress_chown = True
         elif arg == "--suppress-sync":
             suppress_sync = True
+        elif arg == "--umask":
+            umask_value = int(argv.pop(), 8)
         elif arg == "--unshare-net":
             unshare_net = True
         elif arg == "--unshare-ipc":
@@ -1594,7 +1599,7 @@ def enter(argv: list[str]) -> list[str]:
     userns = acquire_privileges(
         identity=True,
         foreign=map_foreign,
-        delegate=(map_delegate + int(foreign)),
+        delegate_ranges=(map_delegate + int(foreign)),
         become_root=(not foreign and become_root),
         network=unshare_net,
     )
@@ -1689,11 +1694,6 @@ def enter(argv: list[str]) -> list[str]:
     # As documented in the pivot_root() man page, this will unmount the old rootfs.
     umount2(".", MNT_DETACH)
 
-    # Avoid surprises by making sure the sandbox's mount propagation is shared. This doesn't
-    # actually mean mounts get propagated into the host. Instead, a new mount propagation peer
-    # group is set up.
-    mount("", ".", "", MS_SHARED | MS_REC, "")
-
     if chdir:
         os.chdir(chdir)
 
@@ -1714,6 +1714,9 @@ def enter(argv: list[str]) -> list[str]:
         if nfds > 0:
             os.environ["LISTEN_FDS"] = str(nfds)
             os.environ["LISTEN_PID"] = str(os.getpid())
+
+    if umask_value is not None:
+        os.umask(umask_value)
 
     return argv
 

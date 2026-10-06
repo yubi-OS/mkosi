@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from mkosi.config import Bootloader, Firmware, OutputFormat
+from mkosi.config import Architecture, Bootloader, Firmware, OutputFormat
 from mkosi.distribution import Distribution
 from mkosi.run import find_binary, run
 from mkosi.versioncomp import GenericVersion
@@ -30,7 +30,7 @@ def test_format(config: ImageConfig, format: OutputFormat) -> None:
         ):
             pytest.skip("Cannot build RHEL-UBI images with format 'esp' or 'uki'")
 
-        image.build(options=["--format", str(format)])
+        image.build(options=[f"--format={format}"])
 
         # FIXME: Also boot directory images when the CI runs systemd v260 or newer.
         if format == OutputFormat.directory:
@@ -59,11 +59,29 @@ def test_format(config: ImageConfig, format: OutputFormat) -> None:
 
 @pytest.mark.parametrize("bootloader", Bootloader)
 def test_bootloader(config: ImageConfig, bootloader: Bootloader) -> None:
-    if config.distribution == Distribution.rhel_ubi or bootloader.is_signed():
+    if config.distribution == Distribution.rhel_ubi or (
+        bootloader.is_signed() and bootloader != Bootloader.uki_signed
+    ):
+        return
+
+    # TODO: want_prebuilt_uki() also fires for UnifiedKernelImage=signed with a non-signed bootloader,
+    # but there is no integration test for that path yet.
+    # uki-signed test matrix:
+    #   x86-64 Fedora  → supports_smbios(uefi)=True,  kernel-uki-virt available → runs
+    #   arm64  Fedora  → supports_smbios(uefi)=True,  kernel-uki-virt available → runs
+    #   ppc64le Fedora → supports_smbios(uefi)=False                             → skipped
+    #   non-Fedora     → no kernel-uki-virt equivalent                           → skipped
+    if bootloader == Bootloader.uki_signed and (
+        config.distribution != Distribution.fedora
+        or not Architecture.native().supports_smbios(Firmware.uefi)
+    ):
         return
 
     firmware = Firmware.linux if bootloader == Bootloader.none else Firmware.auto
+    cacheopt = []
+    if bootloader == Bootloader.uki_signed:
+        cacheopt = ["--incremental=no", "--cache-key=&d~&r~&a~&I~prebuilt"]
 
     with Image(config) as image:
-        image.build(["--format=disk", "--bootloader", str(bootloader)])
-        image.vm(["--firmware", str(firmware)])
+        image.build(["--format=disk", f"--bootloader={bootloader}", *cacheopt])
+        image.vm([f"--firmware={firmware}"])
